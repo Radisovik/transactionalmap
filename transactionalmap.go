@@ -18,13 +18,14 @@ var ErrKeyNotFound = errors.New("key not found")
 var ErrTransactionClosed = errors.New("transaction is closed")
 
 // PreCommitHookFunc is the type for pre-commit hook functions.
-// It receives all pending changes (writes and deletes as zero values) and can
-// modify the map to polish/modify items before they are committed.
+// It receives a direct reference to all pending changes (writes and deletes as zero values).
+// Hooks CAN modify the changes map to polish/modify items before they are committed.
+// This is intentional - for example, hooks can normalize values, add timestamps, etc.
 // Return an error to abort the commit.
 type PreCommitHookFunc[K comparable, V any] func(changes map[K]V) error
 
 // PostCommitHookFunc is the type for post-commit hook functions.
-// It receives all changes that were applied (writes and deletes as zero values).
+// It receives a copy of all changes that were applied (writes and deletes as zero values).
 // This is useful for notifications such as emitting a JSON merge patch.
 type PostCommitHookFunc[K comparable, V any] func(changes map[K]V)
 
@@ -117,6 +118,8 @@ func (m *Map[K, V]) Begin() *Transaction[K, V] {
 // hasChanged checks if the new value is different from the current value using JSON merge patch.
 // Returns true if the value has changed, false if it's identical.
 // Uses RFC 7396 JSON Merge Patch - if the patch is empty {}, there's no change.
+// Note: This uses JSON marshaling which may have performance implications for
+// high-frequency operations. The tradeoff is accurate change detection for complex types.
 func hasChanged[V any](oldValue, newValue V) bool {
 	oldJSON, err := json.Marshal(oldValue)
 	if err != nil {

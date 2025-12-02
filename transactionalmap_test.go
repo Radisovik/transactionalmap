@@ -2,6 +2,7 @@ package transactionalmap
 
 import (
 	"errors"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -858,7 +859,7 @@ func TestConcurrentTransactionOps(t *testing.T) {
 			for j := 0; j < incrementsPerTx; j++ {
 				tx := m.Begin()
 				key := txNum*incrementsPerTx + j
-				_ = tx.Set(string(rune('a'+key%26))+string(rune('0'+key)), key)
+				_ = tx.Set(string(rune('a'+key%26))+"-"+strconv.Itoa(key), key)
 				err := tx.Commit()
 				if err == nil {
 					successfulCommits.Add(1)
