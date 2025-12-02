@@ -1,10 +1,14 @@
 // Package transactionalmap provides a generic map with transaction support,
-// including snapshot isolation, pre-commit and post-commit hooks.
+// including pre-commit and post-commit hooks. The map is read-only and can
+// only be modified through transactions, avoiding the need for snapshot copies.
 package transactionalmap
 
 import (
+	"encoding/json"
 	"errors"
 	"sync"
+
+	jsonpatch "github.com/evanphx/json-patch/v5"
 )
 
 // ErrKeyNotFound is returned when a key is not found in the map.
@@ -13,124 +17,60 @@ var ErrKeyNotFound = errors.New("key not found")
 // ErrTransactionClosed is returned when trying to use a closed transaction.
 var ErrTransactionClosed = errors.New("transaction is closed")
 
-// HookFunc is the type for pre-commit and post-commit hook functions.
-// It receives the key and value being committed.
-type HookFunc[K comparable, V any] func(key K, value V) error
+// PreCommitHookFunc is the type for pre-commit hook functions.
+// It receives all pending changes (writes and deletes as zero values) and can
+// modify the map to polish/modify items before they are committed.
+// Return an error to abort the commit.
+type PreCommitHookFunc[K comparable, V any] func(changes map[K]V) error
 
-// DeleteHookFunc is the type for hooks on delete operations.
-type DeleteHookFunc[K comparable] func(key K) error
+// PostCommitHookFunc is the type for post-commit hook functions.
+// It receives all changes that were applied (writes and deletes as zero values).
+// This is useful for notifications such as emitting a JSON merge patch.
+type PostCommitHookFunc[K comparable, V any] func(changes map[K]V)
 
-// Map is a generic map that supports transactions with snapshot isolation.
+// Map is a generic map that supports transactions. The map is read-only
+// and can only be modified through transactions, which avoids the need
+// for making snapshot copies when beginning a transaction.
 type Map[K comparable, V any] struct {
 	mu              sync.RWMutex
 	data            map[K]V
-	preCommitHooks  []HookFunc[K, V]
-	postCommitHooks []HookFunc[K, V]
-	preDeleteHooks  []DeleteHookFunc[K]
-	postDeleteHooks []DeleteHookFunc[K]
+	preCommitHooks  []PreCommitHookFunc[K, V]
+	postCommitHooks []PostCommitHookFunc[K, V]
 }
 
 // New creates a new transactional map.
 func New[K comparable, V any]() *Map[K, V] {
 	return &Map[K, V]{
 		data:            make(map[K]V),
-		preCommitHooks:  make([]HookFunc[K, V], 0),
-		postCommitHooks: make([]HookFunc[K, V], 0),
-		preDeleteHooks:  make([]DeleteHookFunc[K], 0),
-		postDeleteHooks: make([]DeleteHookFunc[K], 0),
+		preCommitHooks:  make([]PreCommitHookFunc[K, V], 0),
+		postCommitHooks: make([]PostCommitHookFunc[K, V], 0),
 	}
 }
 
-// AddPreCommitHook adds a hook that will be called before each key-value pair is committed.
-// If the hook returns an error, the commit will be aborted.
-func (m *Map[K, V]) AddPreCommitHook(hook HookFunc[K, V]) {
+// AddPreCommitHook adds a hook that will be called before changes are committed.
+// The hook receives all pending changes and can modify them to polish/modify items
+// before they are committed. If the hook returns an error, the commit will be aborted.
+func (m *Map[K, V]) AddPreCommitHook(hook PreCommitHookFunc[K, V]) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.preCommitHooks = append(m.preCommitHooks, hook)
 }
 
-// AddPostCommitHook adds a hook that will be called after each key-value pair is committed.
-func (m *Map[K, V]) AddPostCommitHook(hook HookFunc[K, V]) {
+// AddPostCommitHook adds a hook that will be called after changes are committed.
+// The hook receives all changes that were applied. This is useful for notifications
+// such as emitting a JSON merge patch.
+func (m *Map[K, V]) AddPostCommitHook(hook PostCommitHookFunc[K, V]) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.postCommitHooks = append(m.postCommitHooks, hook)
 }
 
-// AddPreDeleteHook adds a hook that will be called before each key is deleted.
-// If the hook returns an error, the delete will be aborted.
-func (m *Map[K, V]) AddPreDeleteHook(hook DeleteHookFunc[K]) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.preDeleteHooks = append(m.preDeleteHooks, hook)
-}
-
-// AddPostDeleteHook adds a hook that will be called after each key is deleted.
-func (m *Map[K, V]) AddPostDeleteHook(hook DeleteHookFunc[K]) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.postDeleteHooks = append(m.postDeleteHooks, hook)
-}
-
-// Get retrieves a value by key directly from the map (not in a transaction).
+// Get retrieves a value by key directly from the map.
 func (m *Map[K, V]) Get(key K) (V, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	value, ok := m.data[key]
 	return value, ok
-}
-
-// Set sets a value directly in the map (not in a transaction).
-// This will trigger pre-commit and post-commit hooks.
-// If a pre-commit hook returns an error, the value is not set.
-// If a post-commit hook returns an error, the value is already set but the error is returned.
-func (m *Map[K, V]) Set(key K, value V) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Run pre-commit hooks
-	for _, hook := range m.preCommitHooks {
-		if err := hook(key, value); err != nil {
-			return err
-		}
-	}
-
-	m.data[key] = value
-
-	// Run post-commit hooks (note: data is already set, errors are informational)
-	for _, hook := range m.postCommitHooks {
-		if err := hook(key, value); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// Delete removes a key from the map (not in a transaction).
-// This will trigger pre-delete and post-delete hooks.
-// If a pre-delete hook returns an error, the key is not deleted.
-// If a post-delete hook returns an error, the key is already deleted but the error is returned.
-func (m *Map[K, V]) Delete(key K) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Run pre-delete hooks
-	for _, hook := range m.preDeleteHooks {
-		if err := hook(key); err != nil {
-			return err
-		}
-	}
-
-	delete(m.data, key)
-
-	// Run post-delete hooks (note: key is already deleted, errors are informational)
-	for _, hook := range m.postDeleteHooks {
-		if err := hook(key); err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
 
 // Len returns the number of items in the map.
@@ -140,73 +80,65 @@ func (m *Map[K, V]) Len() int {
 	return len(m.data)
 }
 
-// Keys returns all keys in the map.
-func (m *Map[K, V]) Keys() []K {
+// Range calls the provided function for each key-value pair in the map.
+// If the function returns false, iteration stops.
+func (m *Map[K, V]) Range(fn func(key K, value V) bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	keys := make([]K, 0, len(m.data))
-	for k := range m.data {
-		keys = append(keys, k)
+	for k, v := range m.data {
+		if !fn(k, v) {
+			return
+		}
 	}
-	return keys
 }
 
-// Values returns all values in the map.
-func (m *Map[K, V]) Values() []V {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	values := make([]V, 0, len(m.data))
-	for _, v := range m.data {
-		values = append(values, v)
-	}
-	return values
-}
-
-// Clear removes all items from the map.
-func (m *Map[K, V]) Clear() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.data = make(map[K]V)
-}
-
-// operation represents a pending operation in a transaction.
-type operation[K comparable, V any] struct {
-	key      K
-	value    V
-	isDelete bool
-}
-
-// Transaction represents a transaction on the map with snapshot isolation.
+// Transaction represents a transaction on the map. Since the map is read-only,
+// transactions read directly from the parent map and overlay pending changes,
+// avoiding the need for snapshot copies.
 type Transaction[K comparable, V any] struct {
 	parent     *Map[K, V]
-	snapshot   map[K]V
-	pending    []operation[K, V]
-	deleted    map[K]bool
+	changes    map[K]V    // pending changes (writes and deletes as zero values)
+	deleted    map[K]bool // track which keys are marked for deletion
 	committed  bool
 	rolledBack bool
 	mu         sync.Mutex
 }
 
-// Begin starts a new transaction with a snapshot of the current map state.
+// Begin starts a new transaction. Since the map is read-only (can only be
+// modified through transactions), no snapshot copy is needed.
 func (m *Map[K, V]) Begin() *Transaction[K, V] {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	snapshot := make(map[K]V, len(m.data))
-	for k, v := range m.data {
-		snapshot[k] = v
-	}
-
 	return &Transaction[K, V]{
-		parent:   m,
-		snapshot: snapshot,
-		pending:  make([]operation[K, V], 0),
-		deleted:  make(map[K]bool),
+		parent:  m,
+		changes: make(map[K]V),
+		deleted: make(map[K]bool),
 	}
 }
 
+// hasChanged checks if the new value is different from the current value using JSON merge patch.
+// Returns true if the value has changed, false if it's identical.
+// Uses RFC 7396 JSON Merge Patch - if the patch is empty {}, there's no change.
+func hasChanged[V any](oldValue, newValue V) bool {
+	oldJSON, err := json.Marshal(oldValue)
+	if err != nil {
+		return true
+	}
+
+	newJSON, err := json.Marshal(newValue)
+	if err != nil {
+		return true
+	}
+
+	patch, err := jsonpatch.CreateMergePatch(oldJSON, newJSON)
+	if err != nil {
+		return true
+	}
+
+	// Empty patch {} means no change
+	return string(patch) != "{}"
+}
+
 // Get retrieves a value from the transaction's view of the map.
-// It first checks pending operations, then the snapshot.
+// It first checks pending changes, then reads from the parent map.
 func (t *Transaction[K, V]) Get(key K) (V, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -221,23 +153,21 @@ func (t *Transaction[K, V]) Get(key K) (V, bool) {
 		return zero, false
 	}
 
-	// Check pending operations in reverse order (most recent first)
-	for i := len(t.pending) - 1; i >= 0; i-- {
-		op := t.pending[i]
-		if op.key == key {
-			if op.isDelete {
-				return zero, false
-			}
-			return op.value, true
-		}
+	// Check pending changes
+	if value, ok := t.changes[key]; ok {
+		return value, true
 	}
 
-	// Fall back to snapshot
-	value, ok := t.snapshot[key]
+	// Read from parent map
+	t.parent.mu.RLock()
+	defer t.parent.mu.RUnlock()
+	value, ok := t.parent.data[key]
 	return value, ok
 }
 
 // Set stages a value to be set when the transaction is committed.
+// If the value is identical to the current value (determined by JSON merge patch),
+// the change is not recorded.
 func (t *Transaction[K, V]) Set(key K, value V) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -246,18 +176,37 @@ func (t *Transaction[K, V]) Set(key K, value V) error {
 		return ErrTransactionClosed
 	}
 
-	// Remove from deleted set if it was previously deleted in this transaction
+	// Get current value (either from pending changes or parent)
+	var currentValue V
+	var hasCurrentValue bool
+
+	if t.deleted[key] {
+		// Key was deleted in this transaction, so setting it is a change
+		hasCurrentValue = false
+	} else if val, ok := t.changes[key]; ok {
+		currentValue = val
+		hasCurrentValue = true
+	} else {
+		t.parent.mu.RLock()
+		currentValue, hasCurrentValue = t.parent.data[key]
+		t.parent.mu.RUnlock()
+	}
+
+	// Check if value actually changed
+	if hasCurrentValue && !hasChanged(currentValue, value) {
+		return nil
+	}
+
+	// Remove from deleted set if it was previously deleted
 	delete(t.deleted, key)
 
-	t.pending = append(t.pending, operation[K, V]{
-		key:      key,
-		value:    value,
-		isDelete: false,
-	})
+	// Store in pending changes
+	t.changes[key] = value
 	return nil
 }
 
 // Delete stages a key to be deleted when the transaction is committed.
+// Deleted keys are represented in the changes map with the zero value.
 func (t *Transaction[K, V]) Delete(key K) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -266,21 +215,29 @@ func (t *Transaction[K, V]) Delete(key K) error {
 		return ErrTransactionClosed
 	}
 
+	// Check if key exists (either in pending changes or parent)
+	keyExists := false
+	if _, ok := t.changes[key]; ok && !t.deleted[key] {
+		keyExists = true
+	} else if !t.deleted[key] {
+		t.parent.mu.RLock()
+		_, keyExists = t.parent.data[key]
+		t.parent.mu.RUnlock()
+	}
+
+	// If key doesn't exist or already deleted, no change needed
+	if !keyExists {
+		return nil
+	}
+
+	// Mark as deleted and store zero value in changes
 	var zero V
-	t.pending = append(t.pending, operation[K, V]{
-		key:      key,
-		value:    zero,
-		isDelete: true,
-	})
+	t.changes[key] = zero
 	t.deleted[key] = true
 	return nil
 }
 
 // Commit applies all pending operations to the parent map.
-// Pre-commit hooks are called before any changes are applied. If any pre-commit hook fails,
-// the entire transaction is aborted and no changes are made.
-// Post-commit hooks are called after all changes are applied. If a post-commit hook fails,
-// the changes are already committed but the error is returned.
 func (t *Transaction[K, V]) Commit() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -295,50 +252,35 @@ func (t *Transaction[K, V]) Commit() error {
 	t.parent.mu.Lock()
 	defer t.parent.mu.Unlock()
 
-	// First, run all pre-commit hooks for all operations
-	for _, op := range t.pending {
-		if op.isDelete {
-			for _, hook := range t.parent.preDeleteHooks {
-				if err := hook(op.key); err != nil {
-					return err
-				}
-			}
-		} else {
-			for _, hook := range t.parent.preCommitHooks {
-				if err := hook(op.key, op.value); err != nil {
-					return err
-				}
-			}
+	// Run all pre-commit hooks - they can modify the changes
+	for _, hook := range t.parent.preCommitHooks {
+		if err := hook(t.changes); err != nil {
+			return err
 		}
 	}
 
-	// Apply all operations
-	for _, op := range t.pending {
-		if op.isDelete {
-			delete(t.parent.data, op.key)
+	// Apply all changes
+	for key, value := range t.changes {
+		if t.deleted[key] {
+			delete(t.parent.data, key)
 		} else {
-			t.parent.data[op.key] = op.value
-		}
-	}
-
-	// Run all post-commit hooks (note: data is already committed, errors are informational)
-	for _, op := range t.pending {
-		if op.isDelete {
-			for _, hook := range t.parent.postDeleteHooks {
-				if err := hook(op.key); err != nil {
-					return err
-				}
-			}
-		} else {
-			for _, hook := range t.parent.postCommitHooks {
-				if err := hook(op.key, op.value); err != nil {
-					return err
-				}
-			}
+			t.parent.data[key] = value
 		}
 	}
 
 	t.committed = true
+
+	// Run all post-commit hooks for notifications
+	if len(t.parent.postCommitHooks) > 0 {
+		finalChanges := make(map[K]V, len(t.changes))
+		for k, v := range t.changes {
+			finalChanges[k] = v
+		}
+		for _, hook := range t.parent.postCommitHooks {
+			hook(finalChanges)
+		}
+	}
+
 	return nil
 }
 
@@ -354,7 +296,7 @@ func (t *Transaction[K, V]) Rollback() error {
 		return ErrTransactionClosed
 	}
 
-	t.pending = nil
+	t.changes = nil
 	t.deleted = nil
 	t.rolledBack = true
 	return nil
@@ -390,32 +332,20 @@ func (t *Transaction[K, V]) Len() int {
 		return 0
 	}
 
-	// Start with snapshot
-	count := len(t.snapshot)
+	t.parent.mu.RLock()
+	defer t.parent.mu.RUnlock()
 
-	// Track keys that have been added or removed
-	added := make(map[K]bool)
-	removed := make(map[K]bool)
+	count := len(t.parent.data)
 
-	for _, op := range t.pending {
-		if op.isDelete {
-			if _, existsInSnapshot := t.snapshot[op.key]; existsInSnapshot && !removed[op.key] {
+	for key := range t.changes {
+		_, existsInParent := t.parent.data[key]
+		if t.deleted[key] {
+			if existsInParent {
 				count--
-				removed[op.key] = true
-			} else if added[op.key] {
-				count--
-				delete(added, op.key)
 			}
 		} else {
-			_, existsInSnapshot := t.snapshot[op.key]
-			if !existsInSnapshot && !added[op.key] {
+			if !existsInParent {
 				count++
-				added[op.key] = true
-			}
-			// If it was removed, add it back
-			if removed[op.key] {
-				count++
-				delete(removed, op.key)
 			}
 		}
 	}
@@ -423,9 +353,44 @@ func (t *Transaction[K, V]) Len() int {
 	return count
 }
 
-// PendingChanges returns the number of pending operations in this transaction.
+// PendingChanges returns the number of pending changes in this transaction.
 func (t *Transaction[K, V]) PendingChanges() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return len(t.pending)
+	return len(t.changes)
+}
+
+// Range calls the provided function for each key-value pair visible in this transaction.
+// If the function returns false, iteration stops.
+func (t *Transaction[K, V]) Range(fn func(key K, value V) bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.committed || t.rolledBack {
+		return
+	}
+
+	t.parent.mu.RLock()
+	defer t.parent.mu.RUnlock()
+
+	visited := make(map[K]bool)
+
+	// First, iterate over changes (excluding deletes)
+	for key, value := range t.changes {
+		visited[key] = true
+		if !t.deleted[key] {
+			if !fn(key, value) {
+				return
+			}
+		}
+	}
+
+	// Then, iterate over parent map (excluding visited and deleted keys)
+	for key, value := range t.parent.data {
+		if !visited[key] && !t.deleted[key] {
+			if !fn(key, value) {
+				return
+			}
+		}
+	}
 }

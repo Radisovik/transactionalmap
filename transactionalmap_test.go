@@ -8,7 +8,7 @@ import (
 )
 
 // TestNew tests the creation of a new transactional map.
-func TestNew(t *testing.T) {
+func TestNewMap(t *testing.T) {
 	m := New[string, int]()
 
 	if m == nil {
@@ -20,14 +20,19 @@ func TestNew(t *testing.T) {
 	}
 }
 
-// TestBasicSetGet tests basic set and get operations.
-func TestBasicSetGet(t *testing.T) {
+// TestBasicSetGetViaTransaction tests basic set and get operations via transactions.
+func TestBasicSetGetViaTransaction(t *testing.T) {
 	m := New[string, int]()
 
-	// Set a value
-	err := m.Set("key1", 100)
+	// Set a value via transaction
+	tx := m.Begin()
+	err := tx.Set("key1", 100)
 	if err != nil {
 		t.Fatalf("Set() returned error: %v", err)
+	}
+	err = tx.Commit()
+	if err != nil {
+		t.Fatalf("Commit() returned error: %v", err)
 	}
 
 	// Get the value
@@ -46,17 +51,25 @@ func TestBasicSetGet(t *testing.T) {
 	}
 }
 
-// TestDelete tests the delete operation.
-func TestDelete(t *testing.T) {
+// TestDeleteViaTransaction tests the delete operation via transaction.
+func TestDeleteViaTransaction(t *testing.T) {
 	m := New[string, string]()
 
-	_ = m.Set("key1", "value1")
-	_ = m.Set("key2", "value2")
+	// Set initial values via transaction
+	tx := m.Begin()
+	_ = tx.Set("key1", "value1")
+	_ = tx.Set("key2", "value2")
+	_ = tx.Commit()
 
-	// Delete key1
-	err := m.Delete("key1")
+	// Delete key1 via transaction
+	tx = m.Begin()
+	err := tx.Delete("key1")
 	if err != nil {
 		t.Fatalf("Delete() returned error: %v", err)
+	}
+	err = tx.Commit()
+	if err != nil {
+		t.Fatalf("Commit() returned error: %v", err)
 	}
 
 	// Verify key1 is deleted
@@ -80,115 +93,96 @@ func TestDelete(t *testing.T) {
 	}
 }
 
-// TestLen tests the Len method.
-func TestLen(t *testing.T) {
+// TestLenViaTransaction tests the Len method.
+func TestLenViaTransaction(t *testing.T) {
 	m := New[int, string]()
 
 	if m.Len() != 0 {
 		t.Errorf("Empty map Len() = %d, want 0", m.Len())
 	}
 
-	_ = m.Set(1, "one")
+	tx := m.Begin()
+	_ = tx.Set(1, "one")
+	_ = tx.Commit()
 	if m.Len() != 1 {
 		t.Errorf("After one Set, Len() = %d, want 1", m.Len())
 	}
 
-	_ = m.Set(2, "two")
-	_ = m.Set(3, "three")
+	tx = m.Begin()
+	_ = tx.Set(2, "two")
+	_ = tx.Set(3, "three")
+	_ = tx.Commit()
 	if m.Len() != 3 {
 		t.Errorf("After three Sets, Len() = %d, want 3", m.Len())
 	}
 
-	_ = m.Delete(2)
+	tx = m.Begin()
+	_ = tx.Delete(2)
+	_ = tx.Commit()
 	if m.Len() != 2 {
 		t.Errorf("After Delete, Len() = %d, want 2", m.Len())
 	}
 }
 
-// TestKeys tests the Keys method.
-func TestKeys(t *testing.T) {
+// TestRange tests the Range method on the map.
+func TestRange(t *testing.T) {
 	m := New[string, int]()
 
-	_ = m.Set("a", 1)
-	_ = m.Set("b", 2)
-	_ = m.Set("c", 3)
+	tx := m.Begin()
+	_ = tx.Set("a", 1)
+	_ = tx.Set("b", 2)
+	_ = tx.Set("c", 3)
+	_ = tx.Commit()
 
-	keys := m.Keys()
+	collected := make(map[string]int)
+	m.Range(func(key string, value int) bool {
+		collected[key] = value
+		return true
+	})
 
-	if len(keys) != 3 {
-		t.Errorf("Keys() length = %d, want 3", len(keys))
+	if len(collected) != 3 {
+		t.Errorf("Range collected %d items, want 3", len(collected))
 	}
 
-	keySet := make(map[string]bool)
-	for _, k := range keys {
-		keySet[k] = true
-	}
-
-	for _, expected := range []string{"a", "b", "c"} {
-		if !keySet[expected] {
-			t.Errorf("Keys() missing key %s", expected)
+	for _, key := range []string{"a", "b", "c"} {
+		if _, ok := collected[key]; !ok {
+			t.Errorf("Range missing key %s", key)
 		}
 	}
 }
 
-// TestValues tests the Values method.
-func TestValues(t *testing.T) {
-	m := New[string, int]()
+// TestRangeEarlyStop tests that Range stops when function returns false.
+func TestRangeEarlyStop(t *testing.T) {
+	m := New[int, int]()
 
-	_ = m.Set("a", 1)
-	_ = m.Set("b", 2)
-	_ = m.Set("c", 3)
-
-	values := m.Values()
-
-	if len(values) != 3 {
-		t.Errorf("Values() length = %d, want 3", len(values))
+	tx := m.Begin()
+	for i := 0; i < 10; i++ {
+		_ = tx.Set(i, i*10)
 	}
+	_ = tx.Commit()
 
-	valueSet := make(map[int]bool)
-	for _, v := range values {
-		valueSet[v] = true
-	}
+	count := 0
+	m.Range(func(key int, value int) bool {
+		count++
+		return count < 3 // Stop after 3 items
+	})
 
-	for _, expected := range []int{1, 2, 3} {
-		if !valueSet[expected] {
-			t.Errorf("Values() missing value %d", expected)
-		}
+	if count != 3 {
+		t.Errorf("Range should have stopped after 3 items, got %d", count)
 	}
 }
 
-// TestClear tests the Clear method.
-func TestClear(t *testing.T) {
-	m := New[string, string]()
-
-	_ = m.Set("key1", "value1")
-	_ = m.Set("key2", "value2")
-
-	if m.Len() != 2 {
-		t.Fatalf("Before Clear, Len() = %d, want 2", m.Len())
-	}
-
-	m.Clear()
-
-	if m.Len() != 0 {
-		t.Errorf("After Clear, Len() = %d, want 0", m.Len())
-	}
-
-	_, ok := m.Get("key1")
-	if ok {
-		t.Error("After Clear, Get() returned true for key1")
-	}
-}
-
-// TestTransactionBasic tests basic transaction operations.
-func TestTransactionBasic(t *testing.T) {
+// TestTransactionBasicOps tests basic transaction operations.
+func TestTransactionBasicOps(t *testing.T) {
 	m := New[string, int]()
 
 	// Set some initial data
-	_ = m.Set("existing", 1)
+	tx := m.Begin()
+	_ = tx.Set("existing", 1)
+	_ = tx.Commit()
 
 	// Begin transaction
-	tx := m.Begin()
+	tx = m.Begin()
 
 	if tx == nil {
 		t.Fatal("Begin() returned nil")
@@ -240,63 +234,54 @@ func TestTransactionBasic(t *testing.T) {
 	}
 }
 
-// TestTransactionIsolation tests that transactions provide snapshot isolation.
-func TestTransactionIsolation(t *testing.T) {
+// TestReadOnlyMapBehavior tests that the map is read-only outside transactions.
+func TestReadOnlyMapBehavior(t *testing.T) {
 	m := New[string, int]()
 
-	_ = m.Set("key1", 10)
-	_ = m.Set("key2", 20)
+	// Set initial data via transaction
+	tx := m.Begin()
+	_ = tx.Set("key1", 10)
+	_ = tx.Set("key2", 20)
+	_ = tx.Commit()
 
-	// Begin transaction 1
+	// Start tx1, then make changes via tx2, verify tx1 sees the new values
 	tx1 := m.Begin()
 
-	// Modify map directly after tx1 started
-	_ = m.Set("key1", 100)
-	_ = m.Set("key3", 30)
+	// Modify map via another transaction after tx1 started
+	tx2 := m.Begin()
+	_ = tx2.Set("key1", 100)
+	_ = tx2.Set("key3", 30)
+	_ = tx2.Commit()
 
-	// tx1 should still see the old values (snapshot isolation)
+	// tx1 should see the updated values since there's no snapshot copy
 	value, ok := tx1.Get("key1")
 	if !ok {
 		t.Fatal("tx1 should see key1")
 	}
-	if value != 10 {
-		t.Errorf("tx1 sees key1 = %d, want 10 (snapshot)", value)
-	}
-
-	// tx1 should not see key3 which was added after snapshot
-	_, ok = tx1.Get("key3")
-	if ok {
-		t.Error("tx1 should not see key3 (added after snapshot)")
-	}
-
-	// Begin transaction 2 (should see current state)
-	tx2 := m.Begin()
-
-	value, ok = tx2.Get("key1")
-	if !ok {
-		t.Fatal("tx2 should see key1")
-	}
 	if value != 100 {
-		t.Errorf("tx2 sees key1 = %d, want 100", value)
+		t.Errorf("tx1 sees key1 = %d, want 100 (current value)", value)
 	}
 
-	value, ok = tx2.Get("key3")
+	// tx1 should see key3 which was added by tx2
+	value, ok = tx1.Get("key3")
 	if !ok {
-		t.Fatal("tx2 should see key3")
+		t.Fatal("tx1 should see key3")
 	}
 	if value != 30 {
-		t.Errorf("tx2 sees key3 = %d, want 30", value)
+		t.Errorf("tx1 sees key3 = %d, want 30", value)
 	}
 }
 
-// TestTransactionDelete tests deleting keys in a transaction.
-func TestTransactionDelete(t *testing.T) {
+// TestTransactionDeleteOps tests deleting keys in a transaction.
+func TestTransactionDeleteOps(t *testing.T) {
 	m := New[string, string]()
 
-	_ = m.Set("keep", "value1")
-	_ = m.Set("delete", "value2")
-
 	tx := m.Begin()
+	_ = tx.Set("keep", "value1")
+	_ = tx.Set("delete", "value2")
+	_ = tx.Commit()
+
+	tx = m.Begin()
 
 	// Delete a key in the transaction
 	err := tx.Delete("delete")
@@ -334,13 +319,15 @@ func TestTransactionDelete(t *testing.T) {
 	}
 }
 
-// TestTransactionRollback tests rolling back a transaction.
-func TestTransactionRollback(t *testing.T) {
+// TestTransactionRollbackOps tests rolling back a transaction.
+func TestTransactionRollbackOps(t *testing.T) {
 	m := New[string, int]()
 
-	_ = m.Set("original", 1)
-
 	tx := m.Begin()
+	_ = tx.Set("original", 1)
+	_ = tx.Commit()
+
+	tx = m.Begin()
 
 	// Make some changes
 	_ = tx.Set("new", 2)
@@ -368,8 +355,8 @@ func TestTransactionRollback(t *testing.T) {
 	}
 }
 
-// TestTransactionClosedError tests that operations fail on closed transactions.
-func TestTransactionClosedError(t *testing.T) {
+// TestTransactionClosedErr tests that operations fail on closed transactions.
+func TestTransactionClosedErr(t *testing.T) {
 	m := New[string, int]()
 
 	// Test after commit
@@ -406,60 +393,91 @@ func TestTransactionClosedError(t *testing.T) {
 	}
 }
 
-// TestPreCommitHook tests pre-commit hooks.
-func TestPreCommitHook(t *testing.T) {
+// TestPreCommitHookWithNewSignature tests pre-commit hooks with the new signature.
+func TestPreCommitHookWithNewSignature(t *testing.T) {
 	m := New[string, int]()
 
 	hookCalled := false
-	var hookedKey string
-	var hookedValue int
+	var capturedChanges map[string]int
 
-	m.AddPreCommitHook(func(key string, value int) error {
+	m.AddPreCommitHook(func(changes map[string]int) error {
 		hookCalled = true
-		hookedKey = key
-		hookedValue = value
+		capturedChanges = make(map[string]int)
+		for k, v := range changes {
+			capturedChanges[k] = v
+		}
 		return nil
 	})
 
-	err := m.Set("testkey", 42)
+	tx := m.Begin()
+	_ = tx.Set("testkey", 42)
+	err := tx.Commit()
 	if err != nil {
-		t.Fatalf("Set() returned error: %v", err)
+		t.Fatalf("Commit() returned error: %v", err)
 	}
 
 	if !hookCalled {
 		t.Error("Pre-commit hook was not called")
 	}
-	if hookedKey != "testkey" {
-		t.Errorf("Hook received key %s, want testkey", hookedKey)
-	}
-	if hookedValue != 42 {
-		t.Errorf("Hook received value %d, want 42", hookedValue)
+	if capturedChanges["testkey"] != 42 {
+		t.Errorf("Hook received changes %v, want testkey=42", capturedChanges)
 	}
 }
 
-// TestPreCommitHookError tests that pre-commit hook errors abort the operation.
-func TestPreCommitHookError(t *testing.T) {
+// TestPreCommitHookModify tests that pre-commit hooks can modify changes.
+func TestPreCommitHookModify(t *testing.T) {
+	m := New[string, int]()
+
+	// Hook that doubles all values
+	m.AddPreCommitHook(func(changes map[string]int) error {
+		for k, v := range changes {
+			changes[k] = v * 2
+		}
+		return nil
+	})
+
+	tx := m.Begin()
+	_ = tx.Set("key", 50)
+	_ = tx.Commit()
+
+	value, ok := m.Get("key")
+	if !ok {
+		t.Fatal("Get() returned false")
+	}
+	if value != 100 {
+		t.Errorf("Get() = %d, want 100 (modified by hook)", value)
+	}
+}
+
+// TestPreCommitHookAbort tests that pre-commit hook errors abort the operation.
+func TestPreCommitHookAbort(t *testing.T) {
 	m := New[string, int]()
 
 	expectedErr := errors.New("validation failed")
 
-	m.AddPreCommitHook(func(key string, value int) error {
-		if value < 0 {
-			return expectedErr
+	m.AddPreCommitHook(func(changes map[string]int) error {
+		for _, v := range changes {
+			if v < 0 {
+				return expectedErr
+			}
 		}
 		return nil
 	})
 
 	// Positive value should succeed
-	err := m.Set("positive", 10)
+	tx := m.Begin()
+	_ = tx.Set("positive", 10)
+	err := tx.Commit()
 	if err != nil {
-		t.Fatalf("Set() with positive value returned error: %v", err)
+		t.Fatalf("Commit() with positive value returned error: %v", err)
 	}
 
 	// Negative value should fail
-	err = m.Set("negative", -5)
+	tx = m.Begin()
+	_ = tx.Set("negative", -5)
+	err = tx.Commit()
 	if err != expectedErr {
-		t.Errorf("Set() with negative value: got %v, want %v", err, expectedErr)
+		t.Errorf("Commit() with negative value: got %v, want %v", err, expectedErr)
 	}
 
 	// Verify the negative value was not set
@@ -469,120 +487,141 @@ func TestPreCommitHookError(t *testing.T) {
 	}
 }
 
-// TestPostCommitHook tests post-commit hooks.
-func TestPostCommitHook(t *testing.T) {
+// TestPostCommitHookNotifications tests post-commit hooks for notifications.
+func TestPostCommitHookNotifications(t *testing.T) {
 	m := New[string, int]()
 
-	var hookCalls []string
+	var receivedChanges map[string]int
+	hookCalled := false
 
-	m.AddPostCommitHook(func(key string, value int) error {
-		hookCalls = append(hookCalls, key)
-		return nil
+	m.AddPostCommitHook(func(changes map[string]int) {
+		hookCalled = true
+		receivedChanges = changes
 	})
 
-	_ = m.Set("first", 1)
-	_ = m.Set("second", 2)
+	tx := m.Begin()
+	_ = tx.Set("first", 1)
+	_ = tx.Set("second", 2)
+	_ = tx.Commit()
 
-	if len(hookCalls) != 2 {
-		t.Errorf("Post-commit hook called %d times, want 2", len(hookCalls))
+	if !hookCalled {
+		t.Error("Post-commit hook was not called")
+	}
+	if len(receivedChanges) != 2 {
+		t.Errorf("Post-commit hook received %d changes, want 2", len(receivedChanges))
+	}
+	if receivedChanges["first"] != 1 || receivedChanges["second"] != 2 {
+		t.Errorf("Post-commit hook received wrong changes: %v", receivedChanges)
 	}
 }
 
-// TestPreDeleteHook tests pre-delete hooks.
-func TestPreDeleteHook(t *testing.T) {
-	m := New[string, string]()
+// TestPostCommitHookWithDeletes tests post-commit hooks with deletes (zero values).
+func TestPostCommitHookWithDeletes(t *testing.T) {
+	m := New[string, *int]()
 
-	_ = m.Set("deletable", "value1")
-	_ = m.Set("protected", "value2")
+	// Set up initial data with pointer values
+	val1 := 1
+	val2 := 2
+	tx := m.Begin()
+	_ = tx.Set("key1", &val1)
+	_ = tx.Set("key2", &val2)
+	_ = tx.Commit()
 
-	m.AddPreDeleteHook(func(key string) error {
-		if key == "protected" {
-			return errors.New("cannot delete protected key")
-		}
-		return nil
+	var receivedChanges map[string]*int
+
+	m.AddPostCommitHook(func(changes map[string]*int) {
+		receivedChanges = changes
 	})
 
-	// Deleting deletable should succeed
-	err := m.Delete("deletable")
-	if err != nil {
-		t.Fatalf("Delete(deletable) returned error: %v", err)
+	val3 := 3
+	tx = m.Begin()
+	_ = tx.Set("key3", &val3)
+	_ = tx.Delete("key1")
+	_ = tx.Commit()
+
+	if receivedChanges["key3"] == nil || *receivedChanges["key3"] != 3 {
+		t.Errorf("Post-commit hook missing key3 write")
 	}
-
-	// Deleting protected should fail
-	err = m.Delete("protected")
-	if err == nil {
-		t.Error("Delete(protected) should have returned error")
+	// Deleted key should have nil (zero value for pointer)
+	if _, exists := receivedChanges["key1"]; !exists {
+		t.Error("Post-commit hook should include deleted key1")
 	}
-
-	// Verify protected still exists
-	_, ok := m.Get("protected")
-	if !ok {
-		t.Error("protected key should still exist")
-	}
-}
-
-// TestPostDeleteHook tests post-delete hooks.
-func TestPostDeleteHook(t *testing.T) {
-	m := New[string, int]()
-
-	_ = m.Set("key1", 1)
-	_ = m.Set("key2", 2)
-
-	var deletedKeys []string
-
-	m.AddPostDeleteHook(func(key string) error {
-		deletedKeys = append(deletedKeys, key)
-		return nil
-	})
-
-	_ = m.Delete("key1")
-	_ = m.Delete("key2")
-
-	if len(deletedKeys) != 2 {
-		t.Errorf("Post-delete hook called %d times, want 2", len(deletedKeys))
+	if receivedChanges["key1"] != nil {
+		t.Error("Deleted key1 should have nil value in changes")
 	}
 }
 
-// TestTransactionHooks tests that hooks are called during transaction commit.
-func TestTransactionHooks(t *testing.T) {
+// TestNoChangeIfValueIdentical tests that identical values are not tracked.
+func TestNoChangeIfValueIdentical(t *testing.T) {
+	type Item struct {
+		Name  string `json:"name"`
+		Value int    `json:"value"`
+	}
+
+	m := New[string, *Item]()
+
+	item := &Item{Name: "test", Value: 42}
+	tx := m.Begin()
+	_ = tx.Set("key", item)
+	_ = tx.Commit()
+
+	var changeCount int
+	m.AddPostCommitHook(func(changes map[string]*Item) {
+		changeCount = len(changes)
+	})
+
+	// Set identical value - should not trigger change
+	identicalItem := &Item{Name: "test", Value: 42}
+	tx = m.Begin()
+	_ = tx.Set("key", identicalItem)
+	_ = tx.Commit()
+
+	if changeCount != 0 {
+		t.Errorf("Expected 0 changes for identical value, got %d", changeCount)
+	}
+
+	// Set different value - should trigger change
+	differentItem := &Item{Name: "test", Value: 100}
+	tx = m.Begin()
+	_ = tx.Set("key", differentItem)
+	_ = tx.Commit()
+
+	if changeCount != 1 {
+		t.Errorf("Expected 1 change for different value, got %d", changeCount)
+	}
+}
+
+// TestTransactionHooksCalled tests that hooks are called during transaction commit.
+func TestTransactionHooksCalled(t *testing.T) {
 	m := New[string, int]()
 
-	var preCommitCalls []string
-	var postCommitCalls []string
-	var preDeleteCalls []string
-	var postDeleteCalls []string
+	var preCommitCalled bool
+	var postCommitCalled bool
 
-	m.AddPreCommitHook(func(key string, value int) error {
-		preCommitCalls = append(preCommitCalls, key)
+	m.AddPreCommitHook(func(changes map[string]int) error {
+		preCommitCalled = true
 		return nil
 	})
-	m.AddPostCommitHook(func(key string, value int) error {
-		postCommitCalls = append(postCommitCalls, key)
-		return nil
-	})
-	m.AddPreDeleteHook(func(key string) error {
-		preDeleteCalls = append(preDeleteCalls, key)
-		return nil
-	})
-	m.AddPostDeleteHook(func(key string) error {
-		postDeleteCalls = append(postDeleteCalls, key)
-		return nil
+	m.AddPostCommitHook(func(changes map[string]int) {
+		postCommitCalled = true
 	})
 
 	// Set up initial data
-	_ = m.Set("existing", 1)
-
-	// Clear the calls from setup
-	preCommitCalls = nil
-	postCommitCalls = nil
-
 	tx := m.Begin()
+	_ = tx.Set("existing", 1)
+	_ = tx.Commit()
+
+	// Reset flags
+	preCommitCalled = false
+	postCommitCalled = false
+
+	tx = m.Begin()
 	_ = tx.Set("new1", 10)
 	_ = tx.Set("new2", 20)
 	_ = tx.Delete("existing")
 
 	// Hooks should not be called yet
-	if len(preCommitCalls) > 0 || len(postCommitCalls) > 0 {
+	if preCommitCalled || postCommitCalled {
 		t.Error("Hooks should not be called before commit")
 	}
 
@@ -591,95 +630,39 @@ func TestTransactionHooks(t *testing.T) {
 		t.Fatalf("Commit() returned error: %v", err)
 	}
 
-	// Verify pre-commit hooks were called
-	if len(preCommitCalls) != 2 {
-		t.Errorf("Pre-commit hook called %d times, want 2", len(preCommitCalls))
+	// Verify hooks were called
+	if !preCommitCalled {
+		t.Error("Pre-commit hook was not called")
 	}
-
-	// Verify post-commit hooks were called
-	if len(postCommitCalls) != 2 {
-		t.Errorf("Post-commit hook called %d times, want 2", len(postCommitCalls))
-	}
-
-	// Verify pre-delete hooks were called
-	if len(preDeleteCalls) != 1 {
-		t.Errorf("Pre-delete hook called %d times, want 1", len(preDeleteCalls))
-	}
-
-	// Verify post-delete hooks were called
-	if len(postDeleteCalls) != 1 {
-		t.Errorf("Post-delete hook called %d times, want 1", len(postDeleteCalls))
+	if !postCommitCalled {
+		t.Error("Post-commit hook was not called")
 	}
 }
 
-// TestTransactionPreCommitHookError tests that pre-commit hook errors abort transaction.
-func TestTransactionPreCommitHookError(t *testing.T) {
-	m := New[string, int]()
-
-	expectedErr := errors.New("validation failed")
-
-	m.AddPreCommitHook(func(key string, value int) error {
-		if key == "invalid" {
-			return expectedErr
-		}
-		return nil
-	})
-
-	_ = m.Set("original", 1)
-
-	tx := m.Begin()
-	_ = tx.Set("valid", 10)
-	_ = tx.Set("invalid", 20)
-	_ = tx.Set("another", 30)
-
-	err := tx.Commit()
-	if err != expectedErr {
-		t.Errorf("Commit() error = %v, want %v", err, expectedErr)
-	}
-
-	// Verify none of the transaction changes were applied
-	// (atomicity - if one fails, all fail)
-	_, ok := m.Get("valid")
-	if ok {
-		t.Error("valid key should not exist after failed commit")
-	}
-
-	_, ok = m.Get("another")
-	if ok {
-		t.Error("another key should not exist after failed commit")
-	}
-
-	// Original should still exist
-	_, ok = m.Get("original")
-	if !ok {
-		t.Error("original key should still exist")
-	}
-}
-
-// TestMultipleHooks tests that multiple hooks are called in order.
-func TestMultipleHooks(t *testing.T) {
+// TestMultipleHooksOrder tests that multiple hooks are called in order.
+func TestMultipleHooksOrder(t *testing.T) {
 	m := New[string, int]()
 
 	var order []int
 
-	m.AddPreCommitHook(func(key string, value int) error {
+	m.AddPreCommitHook(func(changes map[string]int) error {
 		order = append(order, 1)
 		return nil
 	})
-	m.AddPreCommitHook(func(key string, value int) error {
+	m.AddPreCommitHook(func(changes map[string]int) error {
 		order = append(order, 2)
 		return nil
 	})
-	m.AddPostCommitHook(func(key string, value int) error {
+	m.AddPostCommitHook(func(changes map[string]int) {
 		order = append(order, 3)
-		return nil
 	})
-	m.AddPostCommitHook(func(key string, value int) error {
+	m.AddPostCommitHook(func(changes map[string]int) {
 		order = append(order, 4)
-		return nil
 	})
 
-	_ = m.Set("key", 1)
+	tx := m.Begin()
+	_ = tx.Set("key", 1)
+	_ = tx.Commit()
 
 	expected := []int{1, 2, 3, 4}
 	if len(order) != len(expected) {
@@ -692,14 +675,16 @@ func TestMultipleHooks(t *testing.T) {
 	}
 }
 
-// TestTransactionLen tests the Len method on transactions.
-func TestTransactionLen(t *testing.T) {
+// TestTransactionLenMethod tests the Len method on transactions.
+func TestTransactionLenMethod(t *testing.T) {
 	m := New[string, int]()
 
-	_ = m.Set("a", 1)
-	_ = m.Set("b", 2)
-
 	tx := m.Begin()
+	_ = tx.Set("a", 1)
+	_ = tx.Set("b", 2)
+	_ = tx.Commit()
+
+	tx = m.Begin()
 
 	if tx.Len() != 2 {
 		t.Errorf("Initial transaction Len() = %d, want 2", tx.Len())
@@ -722,13 +707,49 @@ func TestTransactionLen(t *testing.T) {
 	}
 }
 
-// TestTransactionPendingChanges tests the PendingChanges method.
-func TestTransactionPendingChanges(t *testing.T) {
+// TestTransactionRange tests Range on transaction.
+func TestTransactionRange(t *testing.T) {
 	m := New[string, int]()
 
-	_ = m.Set("existing", 1)
+	tx := m.Begin()
+	_ = tx.Set("a", 1)
+	_ = tx.Set("b", 2)
+	_ = tx.Commit()
+
+	tx = m.Begin()
+	_ = tx.Set("c", 3)
+	_ = tx.Delete("a")
+
+	collected := make(map[string]int)
+	tx.Range(func(key string, value int) bool {
+		collected[key] = value
+		return true
+	})
+
+	// Should see b and c, not a
+	if len(collected) != 2 {
+		t.Errorf("Transaction Range collected %d items, want 2", len(collected))
+	}
+	if _, ok := collected["a"]; ok {
+		t.Error("Transaction Range should not include deleted key 'a'")
+	}
+	if collected["b"] != 2 {
+		t.Errorf("Transaction Range missing or wrong value for 'b'")
+	}
+	if collected["c"] != 3 {
+		t.Errorf("Transaction Range missing or wrong value for 'c'")
+	}
+}
+
+// TestTransactionPendingChangesMethod tests the PendingChanges method.
+func TestTransactionPendingChangesMethod(t *testing.T) {
+	m := New[string, int]()
 
 	tx := m.Begin()
+	_ = tx.Set("existing", 1)
+	_ = tx.Commit()
+
+	tx = m.Begin()
 
 	if tx.PendingChanges() != 0 {
 		t.Errorf("Initial PendingChanges() = %d, want 0", tx.PendingChanges())
@@ -781,14 +802,16 @@ func TestTransactionIsClosedMethods(t *testing.T) {
 	}
 }
 
-// TestConcurrentReads tests concurrent read operations.
-func TestConcurrentReads(t *testing.T) {
+// TestConcurrentReadOps tests concurrent read operations.
+func TestConcurrentReadOps(t *testing.T) {
 	m := New[int, int]()
 
-	// Set up initial data
+	// Set up initial data via transaction
+	tx := m.Begin()
 	for i := 0; i < 100; i++ {
-		_ = m.Set(i, i*10)
+		_ = tx.Set(i, i*10)
 	}
+	_ = tx.Commit()
 
 	var wg sync.WaitGroup
 	errChan := make(chan error, 100)
@@ -817,46 +840,9 @@ func TestConcurrentReads(t *testing.T) {
 	}
 }
 
-// TestConcurrentWrites tests concurrent write operations.
-func TestConcurrentWrites(t *testing.T) {
-	m := New[int, int]()
-
-	var wg sync.WaitGroup
-	iterations := 100
-
-	// Spawn multiple goroutines writing concurrently
-	for i := 0; i < iterations; i++ {
-		wg.Add(1)
-		go func(key int) {
-			defer wg.Done()
-			_ = m.Set(key, key*10)
-		}(i)
-	}
-
-	wg.Wait()
-
-	// Verify all writes succeeded
-	if m.Len() != iterations {
-		t.Errorf("Len() = %d, want %d", m.Len(), iterations)
-	}
-
-	for i := 0; i < iterations; i++ {
-		value, ok := m.Get(i)
-		if !ok {
-			t.Errorf("Key %d not found", i)
-			continue
-		}
-		if value != i*10 {
-			t.Errorf("Get(%d) = %d, want %d", i, value, i*10)
-		}
-	}
-}
-
-// TestConcurrentTransactions tests multiple concurrent transactions.
-func TestConcurrentTransactions(t *testing.T) {
+// TestConcurrentTransactionOps tests multiple concurrent transactions.
+func TestConcurrentTransactionOps(t *testing.T) {
 	m := New[string, int]()
-
-	_ = m.Set("counter", 0)
 
 	var wg sync.WaitGroup
 	transactions := 10
@@ -886,8 +872,8 @@ func TestConcurrentTransactions(t *testing.T) {
 	t.Logf("Successful commits: %d", successfulCommits.Load())
 }
 
-// TestGenericTypes tests the map with various generic type combinations.
-func TestGenericTypes(t *testing.T) {
+// TestGenericTypeCombinations tests the map with various generic type combinations.
+func TestGenericTypeCombinations(t *testing.T) {
 	t.Run("StringToStruct", func(t *testing.T) {
 		type Person struct {
 			Name string
@@ -895,7 +881,9 @@ func TestGenericTypes(t *testing.T) {
 		}
 
 		m := New[string, Person]()
-		_ = m.Set("alice", Person{Name: "Alice", Age: 30})
+		tx := m.Begin()
+		_ = tx.Set("alice", Person{Name: "Alice", Age: 30})
+		_ = tx.Commit()
 
 		value, ok := m.Get("alice")
 		if !ok {
@@ -908,7 +896,9 @@ func TestGenericTypes(t *testing.T) {
 
 	t.Run("IntToSlice", func(t *testing.T) {
 		m := New[int, []string]()
-		_ = m.Set(1, []string{"a", "b", "c"})
+		tx := m.Begin()
+		_ = tx.Set(1, []string{"a", "b", "c"})
+		_ = tx.Commit()
 
 		value, ok := m.Get(1)
 		if !ok {
@@ -925,7 +915,9 @@ func TestGenericTypes(t *testing.T) {
 		}
 
 		m := New[Key, map[string]int]()
-		_ = m.Set(Key{1, 2}, map[string]int{"value": 42})
+		tx := m.Begin()
+		_ = tx.Set(Key{1, 2}, map[string]int{"value": 42})
+		_ = tx.Commit()
 
 		value, ok := m.Get(Key{1, 2})
 		if !ok {
@@ -937,13 +929,15 @@ func TestGenericTypes(t *testing.T) {
 	})
 }
 
-// TestTransactionOverwrite tests overwriting values in a transaction.
-func TestTransactionOverwrite(t *testing.T) {
+// TestTransactionOverwriteOps tests overwriting values in a transaction.
+func TestTransactionOverwriteOps(t *testing.T) {
 	m := New[string, int]()
 
-	_ = m.Set("key", 1)
-
 	tx := m.Begin()
+	_ = tx.Set("key", 1)
+	_ = tx.Commit()
+
+	tx = m.Begin()
 
 	// Overwrite multiple times in the same transaction
 	_ = tx.Set("key", 10)
@@ -969,13 +963,15 @@ func TestTransactionOverwrite(t *testing.T) {
 	}
 }
 
-// TestTransactionDeleteThenSet tests deleting then re-setting a key.
-func TestTransactionDeleteThenSet(t *testing.T) {
+// TestTransactionDeleteThenSetOps tests deleting then re-setting a key.
+func TestTransactionDeleteThenSetOps(t *testing.T) {
 	m := New[string, int]()
 
-	_ = m.Set("key", 1)
-
 	tx := m.Begin()
+	_ = tx.Set("key", 1)
+	_ = tx.Commit()
+
+	tx = m.Begin()
 
 	_ = tx.Delete("key")
 	_, ok := tx.Get("key")
@@ -1003,8 +999,8 @@ func TestTransactionDeleteThenSet(t *testing.T) {
 	}
 }
 
-// TestTransactionSetThenDelete tests setting then deleting a key.
-func TestTransactionSetThenDelete(t *testing.T) {
+// TestTransactionSetThenDeleteOps tests setting then deleting a key.
+func TestTransactionSetThenDeleteOps(t *testing.T) {
 	m := New[string, int]()
 
 	tx := m.Begin()
@@ -1032,38 +1028,15 @@ func TestTransactionSetThenDelete(t *testing.T) {
 	}
 }
 
-// TestGetAfterClosedTransaction tests Get behavior after transaction closure.
-func TestGetAfterClosedTransaction(t *testing.T) {
+// TestEmptyTransactionCommit tests committing an empty transaction.
+func TestEmptyTransactionCommit(t *testing.T) {
 	m := New[string, int]()
-	_ = m.Set("key", 42)
-
-	// After commit
-	tx1 := m.Begin()
-	_ = tx1.Set("newkey", 100)
-	_ = tx1.Commit()
-
-	_, ok := tx1.Get("key")
-	if ok {
-		t.Error("Get() on committed transaction should return false")
-	}
-
-	// After rollback
-	tx2 := m.Begin()
-	_ = tx2.Set("anotherkey", 200)
-	_ = tx2.Rollback()
-
-	_, ok = tx2.Get("key")
-	if ok {
-		t.Error("Get() on rolled back transaction should return false")
-	}
-}
-
-// TestEmptyTransaction tests committing an empty transaction.
-func TestEmptyTransaction(t *testing.T) {
-	m := New[string, int]()
-	_ = m.Set("key", 1)
 
 	tx := m.Begin()
+	_ = tx.Set("key", 1)
+	_ = tx.Commit()
+
+	tx = m.Begin()
 
 	// Commit without any changes
 	err := tx.Commit()
@@ -1078,44 +1051,20 @@ func TestEmptyTransaction(t *testing.T) {
 	}
 }
 
-// TestLenAfterClosedTransaction tests Len behavior after transaction closure.
-func TestLenAfterClosedTransaction(t *testing.T) {
+// TestDeleteNonExistentKeyOp tests deleting a key that doesn't exist.
+func TestDeleteNonExistentKeyOp(t *testing.T) {
 	m := New[string, int]()
-	_ = m.Set("a", 1)
-	_ = m.Set("b", 2)
-
-	tx := m.Begin()
-	_ = tx.Set("c", 3)
-	_ = tx.Commit()
-
-	if tx.Len() != 0 {
-		t.Errorf("Len() on committed transaction = %d, want 0", tx.Len())
-	}
-
-	tx2 := m.Begin()
-	_ = tx2.Set("d", 4)
-	_ = tx2.Rollback()
-
-	if tx2.Len() != 0 {
-		t.Errorf("Len() on rolled back transaction = %d, want 0", tx2.Len())
-	}
-}
-
-// TestDeleteNonExistentKey tests deleting a key that doesn't exist.
-func TestDeleteNonExistentKey(t *testing.T) {
-	m := New[string, int]()
-
-	// Direct delete of non-existent key
-	err := m.Delete("nonexistent")
-	if err != nil {
-		t.Errorf("Delete(nonexistent) returned error: %v", err)
-	}
 
 	// Transaction delete of non-existent key
 	tx := m.Begin()
-	err = tx.Delete("nonexistent")
+	err := tx.Delete("nonexistent")
 	if err != nil {
 		t.Errorf("Transaction Delete(nonexistent) returned error: %v", err)
+	}
+
+	// Should have no pending changes since key didn't exist
+	if tx.PendingChanges() != 0 {
+		t.Errorf("PendingChanges() = %d, want 0 for deleting non-existent key", tx.PendingChanges())
 	}
 
 	err = tx.Commit()
@@ -1124,31 +1073,8 @@ func TestDeleteNonExistentKey(t *testing.T) {
 	}
 }
 
-// BenchmarkSet benchmarks the Set operation.
-func BenchmarkSet(b *testing.B) {
-	m := New[int, int]()
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = m.Set(i, i)
-	}
-}
-
-// BenchmarkGet benchmarks the Get operation.
-func BenchmarkGet(b *testing.B) {
-	m := New[int, int]()
-	for i := 0; i < 1000; i++ {
-		_ = m.Set(i, i)
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		m.Get(i % 1000)
-	}
-}
-
-// BenchmarkTransactionCommit benchmarks transaction commit.
-func BenchmarkTransactionCommit(b *testing.B) {
+// BenchmarkTransactionSetOp benchmarks the Set operation via transaction.
+func BenchmarkTransactionSetOp(b *testing.B) {
 	m := New[int, int]()
 
 	b.ResetTimer()
@@ -1159,11 +1085,42 @@ func BenchmarkTransactionCommit(b *testing.B) {
 	}
 }
 
-// BenchmarkTransactionWithHooks benchmarks transactions with hooks.
-func BenchmarkTransactionWithHooks(b *testing.B) {
+// BenchmarkGetOp benchmarks the Get operation.
+func BenchmarkGetOp(b *testing.B) {
 	m := New[int, int]()
-	m.AddPreCommitHook(func(k int, v int) error { return nil })
-	m.AddPostCommitHook(func(k int, v int) error { return nil })
+	tx := m.Begin()
+	for i := 0; i < 1000; i++ {
+		_ = tx.Set(i, i)
+	}
+	_ = tx.Commit()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		m.Get(i % 1000)
+	}
+}
+
+// BenchmarkBeginNoSnapshot benchmarks Begin which no longer copies the map.
+func BenchmarkBeginNoSnapshot(b *testing.B) {
+	m := New[int, int]()
+	// Pre-populate with some data
+	tx := m.Begin()
+	for i := 0; i < 10000; i++ {
+		_ = tx.Set(i, i)
+	}
+	_ = tx.Commit()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = m.Begin()
+	}
+}
+
+// BenchmarkTransactionWithHooksOp benchmarks transactions with hooks.
+func BenchmarkTransactionWithHooksOp(b *testing.B) {
+	m := New[int, int]()
+	m.AddPreCommitHook(func(changes map[int]int) error { return nil })
+	m.AddPostCommitHook(func(changes map[int]int) {})
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

@@ -1,14 +1,15 @@
 # transactionalmap
 
-A Go library for a generic map that supports transactions with snapshot isolation, pre-commit and post-commit hooks.
+A Go library for a generic map that supports transactions with pre-commit and post-commit hooks. The map is read-only outside of transactions, avoiding the need for snapshot copies.
 
 ## Features
 
 - **Generics Support**: Works with any comparable key type and any value type
-- **Transaction Support**: Begin, commit, and rollback transactions with snapshot isolation
-- **Pre-commit Hooks**: Execute validation logic before changes are committed
-- **Post-commit Hooks**: Execute side effects after changes are committed
-- **Pre/Post Delete Hooks**: Separate hooks for delete operations
+- **Read-Only Map**: The map can only be modified through transactions
+- **No Snapshot Copies**: Since the map is read-only, no expensive snapshot copies are needed
+- **Pre-commit Hooks**: Modify/polish items before they are committed (receives all changes)
+- **Post-commit Hooks**: Receive notifications of changes (useful for emitting JSON merge patches)
+- **Smart Change Detection**: Uses JSON merge patch (RFC 7396) to detect if values actually changed
 - **Thread-Safe**: All operations are protected by mutexes for concurrent access
 - **Atomic Commits**: If any pre-commit hook fails, the entire transaction is aborted
 
@@ -31,31 +32,29 @@ import (
 )
 
 func main() {
-    // Create a new map with string keys and int values
-    m := tm.New[string, int]()
+    // Create a new map with string keys and pointer values
+    m := tm.New[string, *Item]()
 
-    // Set values
-    m.Set("foo", 42)
-    m.Set("bar", 100)
+    // All modifications must be done through transactions
+    tx := m.Begin()
+    tx.Set("foo", &Item{Value: 42})
+    tx.Set("bar", &Item{Value: 100})
+    tx.Commit()
 
-    // Get values
+    // Read values directly from the map
     value, ok := m.Get("foo")
     if ok {
-        fmt.Println("foo =", value) // Output: foo = 42
+        fmt.Println("foo =", value.Value) // Output: foo = 42
     }
 
-    // Delete values
-    m.Delete("bar")
-
     // Get length
-    fmt.Println("Length:", m.Len()) // Output: Length: 1
+    fmt.Println("Length:", m.Len()) // Output: Length: 2
 
-    // Get all keys
-    keys := m.Keys()
-    fmt.Println("Keys:", keys) // Output: Keys: [foo]
-
-    // Clear all values
-    m.Clear()
+    // Iterate over all items
+    m.Range(func(key string, value *Item) bool {
+        fmt.Printf("%s: %d\n", key, value.Value)
+        return true // continue iteration
+    })
 }
 ```
 
@@ -70,27 +69,27 @@ import (
 )
 
 func main() {
-    m := tm.New[string, int]()
-    m.Set("balance", 100)
+    m := tm.New[string, *Account]()
 
-    // Begin a transaction
+    // Initialize with a transaction
     tx := m.Begin()
+    tx.Set("balance", &Account{Amount: 100})
+    tx.Commit()
 
-    // All reads see a snapshot from when the transaction began
+    // Begin a new transaction
+    tx = m.Begin()
+
+    // Read current value
     balance, _ := tx.Get("balance")
-    fmt.Println("Initial balance:", balance) // Output: Initial balance: 100
+    fmt.Println("Initial balance:", balance.Amount) // Output: Initial balance: 100
 
-    // Stage changes (not visible to other transactions or the main map)
-    tx.Set("balance", balance + 50)
-    tx.Set("pending", 50)
-
-    // Verify changes within transaction
-    newBalance, _ := tx.Get("balance")
-    fmt.Println("New balance:", newBalance) // Output: New balance: 150
+    // Stage changes (not visible to the main map until commit)
+    tx.Set("balance", &Account{Amount: balance.Amount + 50})
+    tx.Set("pending", &Account{Amount: 50})
 
     // Changes are not visible in the main map until commit
     mainBalance, _ := m.Get("balance")
-    fmt.Println("Main map balance:", mainBalance) // Output: Main map balance: 100
+    fmt.Println("Main map balance:", mainBalance.Amount) // Output: Main map balance: 100
 
     // Commit the transaction
     err := tx.Commit()
@@ -101,7 +100,7 @@ func main() {
 
     // Now changes are visible in the main map
     finalBalance, _ := m.Get("balance")
-    fmt.Println("Final balance:", finalBalance) // Output: Final balance: 150
+    fmt.Println("Final balance:", finalBalance.Amount) // Output: Final balance: 150
 }
 ```
 
@@ -109,7 +108,7 @@ func main() {
 
 ```go
 tx := m.Begin()
-tx.Set("key", 100)
+tx.Set("key", &Item{Value: 100})
 
 // Discard all changes
 tx.Rollback()
@@ -119,104 +118,97 @@ _, ok := m.Get("key")
 fmt.Println("Key exists:", ok) // Output: Key exists: false
 ```
 
-### Pre-commit Hooks
+### Pre-commit Hooks (Modify/Polish Items)
 
-Pre-commit hooks are called before each change is applied. If any hook returns an error, the entire transaction is aborted.
+Pre-commit hooks receive ALL pending changes and can modify them before they are committed. This is useful for polishing or transforming data.
 
 ```go
-m := tm.New[string, int]()
+m := tm.New[string, *Item]()
 
-// Add a validation hook
-m.AddPreCommitHook(func(key string, value int) error {
-    if value < 0 {
-        return fmt.Errorf("value must be non-negative")
+// Add a hook that doubles all values
+m.AddPreCommitHook(func(changes map[string]*Item) error {
+    for key, item := range changes {
+        if item != nil { // nil means deletion
+            item.Value *= 2
+        }
     }
     return nil
 })
 
-// This will fail
-err := m.Set("balance", -100)
-if err != nil {
-    fmt.Println("Set failed:", err) // Output: Set failed: value must be non-negative
-}
+// Or add validation
+m.AddPreCommitHook(func(changes map[string]*Item) error {
+    for key, item := range changes {
+        if item != nil && item.Value < 0 {
+            return fmt.Errorf("value for %s must be non-negative", key)
+        }
+    }
+    return nil
+})
 
-// In transactions, hooks are called during Commit()
 tx := m.Begin()
-tx.Set("a", 10)
-tx.Set("b", -5) // Invalid value
+tx.Set("a", &Item{Value: 10})
+tx.Set("b", &Item{Value: 20})
+tx.Commit()
 
-err = tx.Commit()
-if err != nil {
-    fmt.Println("Commit failed:", err) // Output: Commit failed: value must be non-negative
-}
-
-// Neither change was applied because the transaction is atomic
-_, ok := m.Get("a")
-fmt.Println("a exists:", ok) // Output: a exists: false
+// Values are doubled by the hook
+a, _ := m.Get("a")
+fmt.Println("a:", a.Value) // Output: a: 20
 ```
 
-### Post-commit Hooks
+### Post-commit Hooks (Notifications / JSON Merge Patch)
 
-Post-commit hooks are called after changes have been applied. They're useful for side effects like logging or notifications.
-
-```go
-m := tm.New[string, int]()
-
-// Add a logging hook
-m.AddPostCommitHook(func(key string, value int) error {
-    fmt.Printf("Changed %s to %d\n", key, value)
-    return nil
-})
-
-m.Set("count", 42) // Output: Changed count to 42
-```
-
-### Delete Hooks
+Post-commit hooks receive all changes that were applied. Deleted keys have a nil (zero) value. This is useful for emitting notifications or JSON merge patches.
 
 ```go
-m := tm.New[string, string]()
-m.Set("protected", "important data")
+m := tm.New[string, *Item]()
 
-// Prevent deletion of protected keys
-m.AddPreDeleteHook(func(key string) error {
-    if key == "protected" {
-        return fmt.Errorf("cannot delete protected key")
+// Add a notification hook
+m.AddPostCommitHook(func(changes map[string]*Item) {
+    for key, value := range changes {
+        if value == nil {
+            fmt.Printf("Deleted: %s\n", key)
+        } else {
+            fmt.Printf("Set: %s = %v\n", key, value)
+        }
     }
-    return nil
 })
 
-err := m.Delete("protected")
-if err != nil {
-    fmt.Println("Delete failed:", err) // Output: Delete failed: cannot delete protected key
-}
-
-// Add a notification for deletions
-m.AddPostDeleteHook(func(key string) error {
-    fmt.Printf("Key %s was deleted\n", key)
-    return nil
-})
+tx := m.Begin()
+tx.Set("new", &Item{Value: 42})
+tx.Delete("old")
+tx.Commit()
+// Output:
+// Set: new = &{42}
+// Deleted: old
 ```
 
-### Using with Custom Types
+### Smart Change Detection
+
+The library uses JSON merge patch (RFC 7396) to detect if values actually changed. If you set a value that's identical to the current value, no change is recorded.
 
 ```go
-// Custom struct as value
-type User struct {
-    Name  string
-    Email string
-    Age   int
-}
+m := tm.New[string, *Item]()
 
-users := tm.New[int, User]()
-users.Set(1, User{Name: "Alice", Email: "alice@example.com", Age: 30})
+tx := m.Begin()
+tx.Set("key", &Item{Name: "test", Value: 42})
+tx.Commit()
 
-// Custom struct as key (must be comparable)
-type Point struct {
-    X, Y int
-}
+var changeCount int
+m.AddPostCommitHook(func(changes map[string]*Item) {
+    changeCount = len(changes)
+})
 
-points := tm.New[Point, string]()
-points.Set(Point{1, 2}, "origin")
+// Set identical value - no change recorded
+tx = m.Begin()
+tx.Set("key", &Item{Name: "test", Value: 42})
+tx.Commit()
+fmt.Println("Changes:", changeCount) // Output: Changes: 0
+
+// Set different value - change recorded
+tx = m.Begin()
+tx.Set("key", &Item{Name: "test", Value: 100})
+tx.Commit()
+fmt.Println("Changes:", changeCount) // Output: Changes: 1
 ```
 
 ## API Reference
@@ -225,17 +217,11 @@ points.Set(Point{1, 2}, "origin")
 
 - `New[K comparable, V any]() *Map[K, V]` - Create a new transactional map
 - `Get(key K) (V, bool)` - Get a value by key
-- `Set(key K, value V) error` - Set a key-value pair
-- `Delete(key K) error` - Delete a key
 - `Len() int` - Get the number of items
-- `Keys() []K` - Get all keys
-- `Values() []V` - Get all values
-- `Clear()` - Remove all items
+- `Range(fn func(key K, value V) bool)` - Iterate over all items
 - `Begin() *Transaction[K, V]` - Start a new transaction
-- `AddPreCommitHook(hook HookFunc[K, V])` - Add a pre-commit hook
-- `AddPostCommitHook(hook HookFunc[K, V])` - Add a post-commit hook
-- `AddPreDeleteHook(hook DeleteHookFunc[K])` - Add a pre-delete hook
-- `AddPostDeleteHook(hook DeleteHookFunc[K])` - Add a post-delete hook
+- `AddPreCommitHook(hook PreCommitHookFunc[K, V])` - Add a pre-commit hook
+- `AddPostCommitHook(hook PostCommitHookFunc[K, V])` - Add a post-commit hook
 
 ### Transaction[K, V]
 
@@ -245,6 +231,7 @@ points.Set(Point{1, 2}, "origin")
 - `Commit() error` - Apply all staged changes to the parent map
 - `Rollback() error` - Discard all staged changes
 - `Len() int` - Get the number of items visible in this transaction
+- `Range(fn func(key K, value V) bool)` - Iterate over items in transaction view
 - `PendingChanges() int` - Get the number of staged changes
 - `IsCommitted() bool` - Check if the transaction has been committed
 - `IsRolledBack() bool` - Check if the transaction has been rolled back
@@ -252,8 +239,14 @@ points.Set(Point{1, 2}, "origin")
 
 ### Hook Types
 
-- `HookFunc[K comparable, V any] func(key K, value V) error` - Hook for set operations
-- `DeleteHookFunc[K comparable] func(key K) error` - Hook for delete operations
+- `PreCommitHookFunc[K, V] func(changes map[K]V) error` - Hook for modifying changes before commit
+- `PostCommitHookFunc[K, V] func(changes map[K]V)` - Hook for notifications after commit
+
+### Change Representation
+
+In the changes map passed to hooks:
+- **Writes**: Key maps to the new value
+- **Deletes**: Key maps to the zero value (nil for pointers)
 
 ## Thread Safety
 
@@ -263,7 +256,11 @@ All operations on the map and transactions are protected by mutexes. It's safe t
 - Have multiple concurrent transactions
 - Read from a transaction while other transactions are committing
 
-However, transactions provide snapshot isolation, not serializable isolation. If two transactions modify the same key, both can commit successfully, and the last commit wins.
+Note: Since the map is read-only outside transactions, there's no snapshot isolation. A transaction sees the current state of the map, including changes committed by other transactions.
+
+## Dependencies
+
+- [github.com/evanphx/json-patch/v5](https://github.com/evanphx/json-patch) - For RFC 7396 JSON Merge Patch
 
 ## License
 
