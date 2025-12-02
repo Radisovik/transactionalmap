@@ -81,6 +81,8 @@ func (m *Map[K, V]) Get(key K) (V, bool) {
 
 // Set sets a value directly in the map (not in a transaction).
 // This will trigger pre-commit and post-commit hooks.
+// If a pre-commit hook returns an error, the value is not set.
+// If a post-commit hook returns an error, the value is already set but the error is returned.
 func (m *Map[K, V]) Set(key K, value V) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -94,7 +96,7 @@ func (m *Map[K, V]) Set(key K, value V) error {
 
 	m.data[key] = value
 
-	// Run post-commit hooks
+	// Run post-commit hooks (note: data is already set, errors are informational)
 	for _, hook := range m.postCommitHooks {
 		if err := hook(key, value); err != nil {
 			return err
@@ -106,6 +108,8 @@ func (m *Map[K, V]) Set(key K, value V) error {
 
 // Delete removes a key from the map (not in a transaction).
 // This will trigger pre-delete and post-delete hooks.
+// If a pre-delete hook returns an error, the key is not deleted.
+// If a post-delete hook returns an error, the key is already deleted but the error is returned.
 func (m *Map[K, V]) Delete(key K) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -119,7 +123,7 @@ func (m *Map[K, V]) Delete(key K) error {
 
 	delete(m.data, key)
 
-	// Run post-delete hooks
+	// Run post-delete hooks (note: key is already deleted, errors are informational)
 	for _, hook := range m.postDeleteHooks {
 		if err := hook(key); err != nil {
 			return err
@@ -273,8 +277,10 @@ func (t *Transaction[K, V]) Delete(key K) error {
 }
 
 // Commit applies all pending operations to the parent map.
-// Pre-commit hooks are called before each operation, and post-commit hooks after.
-// If any pre-commit hook fails, the entire transaction is aborted.
+// Pre-commit hooks are called before any changes are applied. If any pre-commit hook fails,
+// the entire transaction is aborted and no changes are made.
+// Post-commit hooks are called after all changes are applied. If a post-commit hook fails,
+// the changes are already committed but the error is returned.
 func (t *Transaction[K, V]) Commit() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -315,20 +321,17 @@ func (t *Transaction[K, V]) Commit() error {
 		}
 	}
 
-	// Run all post-commit hooks
+	// Run all post-commit hooks (note: data is already committed, errors are informational)
 	for _, op := range t.pending {
 		if op.isDelete {
 			for _, hook := range t.parent.postDeleteHooks {
 				if err := hook(op.key); err != nil {
-					// Note: The data is already committed at this point
-					// We continue with other hooks but could log this error
 					return err
 				}
 			}
 		} else {
 			for _, hook := range t.parent.postCommitHooks {
 				if err := hook(op.key, op.value); err != nil {
-					// Note: The data is already committed at this point
 					return err
 				}
 			}
